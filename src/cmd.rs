@@ -9,6 +9,8 @@ pub enum CmdEvent {
 
 pub struct Cmd {
     child: Option<SubProcess>,
+    to_ignore: usize,
+    ignored: usize,
     pub events: VecDeque<CmdEvent>,
     stdout: String,
     stdin: String,
@@ -18,6 +20,8 @@ pub struct Cmd {
 impl Cmd {
     pub fn new() -> Self {
         Self {
+            to_ignore: 0,
+            ignored: 0,
             events: VecDeque::new(),
             stdout: "".to_string(),
             stdin: "".to_string(),
@@ -88,6 +92,9 @@ impl Cmd {
     }
 
     pub fn flush_stdin(&mut self) -> String {
+        self.stdin.push('\n');
+        self.ignored = 0;
+        self.to_ignore = self.stdin.len();
         if let Some(ref mut child) = &mut self.child {
             child.write_stdin(self.stdin.as_bytes());
         }
@@ -102,8 +109,22 @@ impl Cmd {
     }
 
     pub fn write_stdout(&mut self, s: &str) {
-        self.stdout += s;
+        for c in s.chars() {
+            self.stdout.push(c);
+        }
         self.emit(CmdEvent::StdoutChanged);
+    }
+
+    pub fn write_bytes(&mut self, b: &[u8]) {
+        for chr in b {
+            // Clear screen 
+            if *chr == 0x0c { 
+                self.clear()
+            }
+            else {
+                self.put_stdout(crate::cp437::cp437_to_unicode(*chr));
+            }
+        }   
     }
 
     pub fn update(&mut self) {
@@ -112,10 +133,8 @@ impl Cmd {
         let this = (self as *mut Self);
         if let Some(ref mut child) = &mut self.child {
             unsafe {
-                let s = crate::cp437::from_cp437_if_windows(&child.get_bytes_stdout());
-                (*this).write_stdout(&s);
-                let s = crate::cp437::from_cp437_if_windows(&child.get_bytes_stderr());
-                (*this).write_stdout(&s);
+                (*this).write_bytes(&child.get_bytes_stderr());
+                (*this).write_bytes(&child.get_bytes_stdout());
             }
             if child.is_dead() {
                 process_done = true;

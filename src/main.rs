@@ -5,7 +5,6 @@ mod cp437;
 mod screen;
 mod cmd;
 mod font;
-mod prompt;
 mod render;
 mod subprocess;
 
@@ -17,6 +16,7 @@ use sdl2::{
     mouse::{MouseButton, MouseWheelDirection},
     pixels::Color,
 };
+use subprocess::SubProcess;
 use std::{convert::TryInto, process::{Command, Stdio}, time::Duration};
 
 const JF_UNFOCUS_AFTER_KEY: u16 = 0b1000_0000_0000_0000;
@@ -40,8 +40,6 @@ pub fn main() {
     let mut cmd = Cmd::new();
     let mut screen = Screen::new(0x07);
 
-    cmd.write_stdout("MS Windows [Version 10.0.10240]\n(c) 2015 MS Corporation. All rights reserved\n\n");
-
     let default_font = Font {
         arrangment: FontArrangment::ASCII,
         glyph_size: (8, 16),
@@ -50,6 +48,7 @@ pub fn main() {
 
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
+    let cwd = std::env::current_dir().unwrap();
 
     // 80x25 text mode res
     let window = video_subsystem
@@ -63,20 +62,46 @@ pub fn main() {
     let mut canvas = window.into_canvas().build().unwrap();
     let mut texture_creator = canvas.texture_creator();
 
-    let mut font_surface = sdl2::surface::Surface::load_bmp("./font.bmp").unwrap();
-    let mut smiley_surface = sdl2::surface::Surface::load_bmp("./smiley.bmp").unwrap();
-
-    let mut font_texture = font_surface.as_texture(&texture_creator).unwrap();
-    let mut smiley_texture = smiley_surface.as_texture(&texture_creator).unwrap();   
-
-
-    if let Some(dir) = std::env::home_dir() {
-        std::env::set_current_dir(dir);
-    }
-    prompt::show_prompt(&mut cmd);
-    let mut visual_cmd = VisualCommandLine::new(font_texture, default_font);
     canvas.clear();
     canvas.present();
+    let mut font_surface = None;
+    let mut smiley_surface = None;
+    if let Some(mut dir) = std::env::home_dir() {
+        let cdir = dir.clone();
+        dir.push("WinCmd");
+        match std::env::set_current_dir(dir) {
+            Ok(_) => {
+                font_surface = Some(sdl2::surface::Surface::load_bmp("./font.bmp").unwrap());
+                smiley_surface = Some(sdl2::surface::Surface::load_bmp("./smiley.bmp").unwrap());
+                std::env::set_current_dir(cwd);
+                if std::env::args().count() > 1 {
+                    cmd.attach_child(SubProcess::from_args(std::env::args()));
+                }
+                else {
+                    cmd.attach_child(SubProcess::from_cmd("real_cmd"));
+                }
+                if !cmd.is_handling_subprocess() {
+                    cmd.write_stdout("real_cmd.exe not found (you might have run the executable directly or installation is broken");
+                }
+            }
+            Err(e) => {
+                cmd.write_stdout(&format!("{:?}: {} (you might have an incorrect installation)", cdir, e));
+            }
+        }
+    }
+    else {
+         cmd.write_stdout("Incorrect installation: C:\\Users\\%USER% not found");
+    }
+
+    
+    let mut font_surface = font_surface.unwrap();
+    let mut smiley_surface = smiley_surface.unwrap();
+ 
+           
+    let mut font_texture = font_surface.as_texture(&texture_creator).unwrap();
+    let mut smiley_texture = smiley_surface.as_texture(&texture_creator).unwrap();   
+    let mut visual_cmd = VisualCommandLine::new(font_texture, default_font);
+
     let mut event_pump = sdl_context.event_pump().unwrap();
     let mut focus_lost = false;
     'running: loop {
@@ -137,6 +162,7 @@ pub fn main() {
                     ..
                 } => {
                     cmd.destroy_child();
+                    cmd.attach_child(SubProcess::from_cmd("real_cmd"));
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::Backspace),
@@ -151,12 +177,8 @@ pub fn main() {
                     ..
                 } => {
                     if !focus_lost {
-                        if !cmd.is_handling_subprocess() {
-                            prompt::interpret(&mut cmd);
-                        } else {
-                            cmd.put_stdout('\n');
-                            cmd.flush_stdin();
-                        }
+                        cmd.put_stdout('\n');
+                        cmd.flush_stdin();
                     }
                 }
                 Event::Window { win_event: WindowEvent::Resized(_, _), .. } |
@@ -224,7 +246,7 @@ pub fn main() {
         for event in cmd.drain_events() {
             match event {
                 CmdEvent::ChildExited => {
-                    prompt::end_of_command(&mut cmd);
+                    break 'running;
                 },
                 CmdEvent::StdoutChanged => {
                     let mut s = cmd.get_stdout().to_string();

@@ -1,4 +1,4 @@
-use std::{io::Write, process::{Child, ChildStderr, ChildStdin, ChildStdout}};
+use std::{env::Args, io::Write, path::PathBuf, process::{Child, ChildStderr, ChildStdin, ChildStdout}};
 use std::{
     io::Read,
     process::{Command, Stdio},
@@ -47,7 +47,7 @@ fn child_non_blocking_stream<S: Read + Send + 'static>(mut stream: S) -> Arc<Mut
 fn subcommand(cmd: &str) -> Option<Child> { 
     use std::os::windows::process::CommandExt;
     const DONT_CREATE_WINDOW: u32 = 0x08000000;
-    Command::new("C:\\Windows\\System32\\cmd.exe")
+    Command::new("real_cmd.exe")
         .creation_flags(DONT_CREATE_WINDOW)
         .args(&["/C", cmd])
         .stdin(Stdio::piped())
@@ -69,8 +69,44 @@ fn subcommand(cmd: &str) -> Option<Child> {
         .ok()
 }
 
+fn subcommand_from_args(cmd: &str, args: &[String]) -> Option<Child> {
+    if cfg!(target_os = "windows") {
+        use std::os::windows::process::CommandExt;
+        const DONT_CREATE_WINDOW: u32 = 0x08000000;
+        Command::new(cmd)
+            .creation_flags(DONT_CREATE_WINDOW)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok()
+    }
+    else {
+        return None;
+    }
+}
 
 impl SubProcess {
+    pub fn from_args(mut args: Args) -> Option<Self> {
+        args.next();
+        let mut cmd = args.next().unwrap_or("".to_string());
+        if cmd == "cmd" { 
+            cmd = "real_cmd.exe".to_string();
+        }
+        else if cmd.to_ascii_lowercase().contains("c:\\windows\\system32\\cmd") {
+            cmd = "real_cmd.exe".to_string()
+        }
+        let args = args.collect::<Vec<_>>();
+        dbg!(&cmd, &args);
+        let mut child = subcommand_from_args(&cmd, args.as_slice())?;
+        Some(Self {
+            stderr: child_non_blocking_stream(child.stderr.take()?),
+            stdout: child_non_blocking_stream(child.stdout.take()?),
+            child: child,
+        })
+    }
+
     pub fn from_cmd(cmd: &str) -> Option<Self> {
         let r = subcommand(cmd);
         let mut child = r?;
@@ -93,7 +129,6 @@ impl SubProcess {
         let s = self.child.stdin.take();
         if let Some(mut stdin) = s {
             stdin.write(&byte);
-            stdin.write(&[b'\n']);
             self.child.stdin = Some(stdin);
         }
     }
